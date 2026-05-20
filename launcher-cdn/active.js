@@ -311,19 +311,76 @@ if (typeof globalThis !== "undefined") {
 }
 
 
-/* jsDelivr / deferred bundle (keep in sync via this script): reads #eh-portable-boot JSON. */
+/* jsDelivr / deferred bundle (keep in sync via this script):
+ * - Prefer inline JSON: <script type="application/json" id="eh-portable-boot">...</script>
+ * - Option B: fetch boot JSON from backend when script src includes:
+ *     ?eh_boot_url=https://api.example.com/public/eh-portable-boot&eh_boot_k=...
+ */
 
 (function () {
-  function ehPortableBootFromDom() {
-    var el = document.getElementById("eh-portable-boot");
-    if (!el || !el.textContent) return;
-    try {
-      EhPortableLauncherMount(JSON.parse(el.textContent));
-    } catch (e) {}
+  var selfSrc = "";
+  try {
+    selfSrc = (document.currentScript && document.currentScript.src) ? String(document.currentScript.src) : "";
+  } catch (e0) {
+    selfSrc = "";
   }
+
+  function injectBootEl(bootObj) {
+    try {
+      var bid = "eh-portable-boot";
+      var el = document.getElementById(bid);
+      if (!el) {
+        el = document.createElement("script");
+        el.type = "application/json";
+        el.id = bid;
+        document.head.appendChild(el);
+      }
+      el.textContent = JSON.stringify(bootObj || {});
+    } catch (e1) {}
+  }
+
+  function bootFromDom() {
+    var el = document.getElementById("eh-portable-boot");
+    if (!el || !el.textContent) return null;
+    try {
+      return JSON.parse(el.textContent);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function bootFromBackend() {
+    if (!selfSrc) return null;
+    var u = null;
+    try { u = new URL(selfSrc); } catch (e0) { u = null; }
+    if (!u) return null;
+    var bootUrl = String(u.searchParams.get("eh_boot_url") || "").trim();
+    var bootKey = String(u.searchParams.get("eh_boot_k") || "").trim();
+    if (!bootUrl || !bootKey) return null;
+    var fetchUrl = bootUrl + (bootUrl.indexOf("?") >= 0 ? "&" : "?") + "k=" + encodeURIComponent(bootKey);
+    try {
+      var r = await fetch(fetchUrl, { method: "GET", cache: "no-store" });
+      if (!r || !r.ok) return null;
+      var j = await r.json();
+      return j || null;
+    } catch (e1) {
+      return null;
+    }
+  }
+
+  async function start() {
+    var boot = bootFromDom();
+    if (!boot) {
+      boot = await bootFromBackend();
+      if (boot) injectBootEl(boot);
+    }
+    if (!boot) return;
+    try { EhPortableLauncherMount(boot); } catch (e0) {}
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", ehPortableBootFromDom);
+    document.addEventListener("DOMContentLoaded", function () { void start(); });
   } else {
-    ehPortableBootFromDom();
+    void start();
   }
 })();
